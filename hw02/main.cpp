@@ -19,99 +19,150 @@
 
 #endif /* __PROGTEST__ */
 
-char bitsToHexaChar(uint8_t bits) {
-    if (bits < 10) {
-        return '0' + bits;
-    } else {
-        return 'A' + bits - 10;
-    }
-}
+int checkBitsZero(int bits, uint8_t * hash) {
+    int bytesToCheck = bits / 8;
+    int  bitsToCheck = bits % 8;
 
-std::string bitsToHex(const std::vector<uint8_t>& data) {
-    std::string hex;
-    for (int i = 0; i < data.size(); ++i) {
-        const uint8_t byte = data[i];
-        hex += bitsToHexaChar(byte / 16);
-        hex += bitsToHexaChar(byte % 16);
-    }
-    return hex;
-}
-
-uint8_t hexCharToBin(char ch) {
-    if ('0' <= ch && ch <= '9') {
-        return ch - '0';
-    } else {
-        return ch - 'A' + 10;
-    }
-}
-std::vector<uint8_t> hexToBin(char const* hex) {
-    std::vector<uint8_t> out;
-    bool isOdd = true;
-    uint8_t buffer = 0;
-    for (;*hex;++hex) {
-        if (isOdd) {
-            buffer |= hexCharToBin(*hex) << 4;
-        } else {
-            buffer |= hexCharToBin(*hex);
-            out.push_back(buffer);
-            buffer = 0;
+    for (int i = 0; i < bytesToCheck; ++i) {
+        if (*hash != 0) {
+            return 0;
         }
-        isOdd = !isOdd;
+        ++hash;
     }
-    return out;
+
+    return !(*hash & ((uint8_t)~0 << (8 - bitsToCheck)));
 }
 
-int findHash (int bits, char ** message, char ** hash) {
-    /* TODO: Your code here */
+char * randomMessage() {
+    const int initLength = EVP_MAX_MD_SIZE;
+    char * message = (char*) malloc(initLength * 2);
+    RAND_bytes((uint8_t*)message, initLength);
+    message[initLength] = '\0';
+    return message;
 }
 
-int findHashEx (int bits, char ** message, char ** hash, const char * hashFunction) {
-    if (bits < 0 || bits >= 512) {
+int hashMessage(char * message, uint8_t * hash, uint32_t& length, const EVP_MD * type) {
+    // Create context for hashing
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) {
+        printf("Failed to create the context");
         return 0;
     }
 
-    /* TODO or use dummy implementation */
+    // context setup for our hash type
+    if (!EVP_DigestInit_ex(ctx, type, NULL)) {
+        printf("Failed to setup the context");
+        return 0;
+    }
+
+    // feed the message in
+    if (!EVP_DigestUpdate(ctx, message, EVP_MAX_MD_SIZE)) {
+        printf("Failed to update the context");
+        return 0;
+    }
+
+    // get the hash
+    if (!EVP_DigestFinal_ex(ctx, hash, &length)) {
+        printf("Failed to fin the context");
+        return 0;
+    }
+
+    // destroy the context
+    EVP_MD_CTX_free(ctx);
+
     return 1;
+}
+
+char * toHex(uint8_t * bytes, uint32_t length) {
+    char* str = (char*) malloc(length * 2 + 1);
+    size_t strLen;
+    OPENSSL_buf2hexstr_ex(str, length * 2 + 1, &strLen, bytes, length, '\0');
+    return str;
+}
+
+int findHashEx (int bits, char ** message, char ** hash, const char * hashFunction) {
+
+    // Used hash type
+    const EVP_MD * type;
+    // Hash buffer setup
+    uint8_t * hashBytes = (uint8_t*) malloc(sizeof(*hashBytes) * EVP_MAX_MD_SIZE * 2);
+    // Hash length
+    uint32_t length;
+
+    // Init OpenSSL lib
+    OpenSSL_add_all_digests();
+    // Gets hash function type
+    type = EVP_get_digestbyname(hashFunction);
+
+    // Unknown hash function
+    if (!type) { 
+        printf("Unknown cypher type\n");
+        return 0;
+    }
+
+    *message = randomMessage();
+    while(true) {
+        if (!hashMessage(*message, hashBytes, length, type)) { return 0; }
+
+        if (bits < 0 || bits >= length) { return 0; }
+
+        if (checkBitsZero(bits, hashBytes)) { break; }
+        memcpy(*message, hashBytes, length);
+        (*message)[EVP_MAX_MD_SIZE] = '\0';
+        // printf("Bits %2d, Try:  %s\n", bits, toHex(hashBytes, length));
+    }
+
+    *hash = toHex(hashBytes, length);
+
+    // printf("Bits %2d, Hash: %s\n", bits, *hash);
+
+    return 1;
+}
+
+int findHash (int bits, char ** message, char ** hash) {
+    return findHashEx(bits, message, hash, "sha512");
 }
 
 #ifndef __PROGTEST__
 
-bool checkHash(int bits, char * hexString) {
-    std::vector<uint8_t> data = hexToBin(hexString);
+#include <chrono>
+using namespace std::chrono;
 
-    for (int i = 0; i < bits; ++i) {
-        if (data[i / 8] & (1 << (7 - i % 8))) {
-            return false;
+
+void measure() {
+    printf("Measuring...\n");
+
+    const int BITS = 20;
+    const int INSTANCES = 128;
+
+    char * message, * hash;
+    for (int i = 0; i < BITS; ++i) {
+        auto start = high_resolution_clock::now();
+        for (int j = 0; j < INSTANCES; ++j) {
+            findHash(i, &message, &hash);
+            free(message);
+            free(hash);
         }
+        auto stop = high_resolution_clock::now();
+        auto duration = duration_cast<microseconds>(stop - start);
+        printf("{%d, %lu},\n", i, duration.count() / INSTANCES);
     }
-    return true;
+    printf("Done!\n");
 }
 
 int main (void) {
 
-    std::string hex;
-    hex = bitsToHex({0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF});
-    assert(hex == "0123456789ABCDEF");
-    assert(hexToBin("0123456789ABCDEF") == std::vector<uint8_t>({0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}));
-
     char * message, * hash;
-    assert(findHash(0, &message, &hash) == 1);
-    assert(message && hash && checkHash(0, hash));
-    free(message);
-    free(hash);
-    assert(findHash(1, &message, &hash) == 1);
-    assert(message && hash && checkHash(1, hash));
-    free(message);
-    free(hash);
-    assert(findHash(2, &message, &hash) == 1);
-    assert(message && hash && checkHash(2, hash));
-    free(message);
-    free(hash);
-    assert(findHash(3, &message, &hash) == 1);
-    assert(message && hash && checkHash(3, hash));
-    free(message);
-    free(hash);
+    for (int i = 0; i < 16; ++i) {
+        assert(findHash(i, &message, &hash) == 1);
+        free(message);
+        free(hash);
+    }
+
+    measure();
+
     assert(findHash(-1, &message, &hash) == 0);
+    assert(findHash(512, &message, &hash) == 0);
     return EXIT_SUCCESS;
 }
 #endif /* __PROGTEST__ */
