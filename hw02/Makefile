@@ -1,5 +1,5 @@
 CC = g++
-CFLAGS = -g3 -fsanitize=address -O2 -Wall -char
+CFLAGS = -g3 -fsanitize=address -O2 -Wall -pedantic
 LDFLAGS = -lcrypto
 
 all: main
@@ -8,6 +8,6 @@ run:
 	# to zrovna
 main: main.o
 	$(CC) -o $@ $< $(LDFLAGS)
-%.o: %.c
+%.o: %.cpp
 	$(CC) -c -o $@ $< $(CFLAGS)
 

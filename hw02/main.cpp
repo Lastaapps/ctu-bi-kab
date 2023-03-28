@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <openssl/crypto.h>
 #ifndef __PROGTEST__
 #include <assert.h>
 #include <ctype.h>
@@ -19,6 +21,8 @@
 
 #endif /* __PROGTEST__ */
 
+const char * defaultType = "sha512";
+
 int checkBitsZero(int bits, uint8_t * hash) {
     int bytesToCheck = bits / 8;
     int  bitsToCheck = bits % 8;
@@ -30,18 +34,21 @@ int checkBitsZero(int bits, uint8_t * hash) {
         ++hash;
     }
 
-    return !(*hash & ((uint8_t)~0 << (8 - bitsToCheck)));
+    if (*hash & ((uint8_t)~0u << (8 - bitsToCheck))) {
+        return 0;
+    }
+
+    return *hash & ((uint8_t)1u << (7 - bitsToCheck));
 }
 
-char * randomMessage() {
+uint8_t * randomMessage() {
     const int initLength = EVP_MAX_MD_SIZE;
-    char * message = (char*) malloc(initLength * 2);
-    RAND_bytes((uint8_t*)message, initLength);
-    message[initLength] = '\0';
+    uint8_t * message = (uint8_t*) malloc(initLength);
+    RAND_bytes(message, initLength);
     return message;
 }
 
-int hashMessage(char * message, uint8_t * hash, uint32_t& length, const EVP_MD * type) {
+int hashMessage(uint8_t * bytes, uint32_t bytesSize, uint8_t * hash, uint32_t& length, const EVP_MD * type) {
     // Create context for hashing
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (ctx == NULL) {
@@ -56,7 +63,7 @@ int hashMessage(char * message, uint8_t * hash, uint32_t& length, const EVP_MD *
     }
 
     // feed the message in
-    if (!EVP_DigestUpdate(ctx, message, EVP_MAX_MD_SIZE)) {
+    if (!EVP_DigestUpdate(ctx, bytes, bytesSize)) {
         printf("Failed to update the context");
         return 0;
     }
@@ -75,24 +82,26 @@ int hashMessage(char * message, uint8_t * hash, uint32_t& length, const EVP_MD *
 
 char * toHex(uint8_t * bytes, uint32_t length) {
     char* str = (char*) malloc(length * 2 + 1);
-    size_t strLen;
-    OPENSSL_buf2hexstr_ex(str, length * 2 + 1, &strLen, bytes, length, '\0');
+    const char mapping[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
+    for (uint32_t i = 0; i < length; ++i) {
+        str[i*2]     = mapping[(((uint8_t)~0u << 4) & bytes[i]) >> 4];
+        str[i*2 + 1] = mapping[(((uint8_t)~0u >> 4) & bytes[i]) << 0];
+    }
+    str[length * 2] = '\0';
+
+    // size_t strLen;
+    // OPENSSL_buf2hexstr_ex(str, length * 2 + 1, &strLen, bytes, length, '\0');
     return str;
 }
 
 int findHashEx (int bits, char ** message, char ** hash, const char * hashFunction) {
-
-    // Used hash type
-    const EVP_MD * type;
-    // Hash buffer setup
-    uint8_t * hashBytes = (uint8_t*) malloc(sizeof(*hashBytes) * EVP_MAX_MD_SIZE * 2);
-    // Hash length
-    uint32_t length;
+    *message = nullptr;
+    *hash = nullptr;
 
     // Init OpenSSL lib
     OpenSSL_add_all_digests();
-    // Gets hash function type
-    type = EVP_get_digestbyname(hashFunction);
+    // Hash type
+    const EVP_MD* type = EVP_get_digestbyname(hashFunction);
 
     // Unknown hash function
     if (!type) { 
@@ -100,19 +109,39 @@ int findHashEx (int bits, char ** message, char ** hash, const char * hashFuncti
         return 0;
     }
 
-    *message = randomMessage();
+    uint8_t* bytes = (uint8_t*) malloc(EVP_MAX_MD_SIZE);
+    uint8_t* processing = randomMessage();
+    uint32_t length = EVP_MAX_MD_SIZE;
+    uint32_t processed;
+
     while(true) {
-        if (!hashMessage(*message, hashBytes, length, type)) { return 0; }
+        processed = length;
 
-        if (bits < 0 || bits >= length) { return 0; }
+        if (!hashMessage(processing, processed, bytes, length, type)) { 
+            free(bytes);
+            free(processing); 
+            return 0; 
+        }
 
-        if (checkBitsZero(bits, hashBytes)) { break; }
-        memcpy(*message, hashBytes, length);
-        (*message)[EVP_MAX_MD_SIZE] = '\0';
+        if (bits < 0 || bits >= (int) length * 8) { 
+            free(bytes); 
+            free(processing); 
+            return 0; 
+        }
+
+        if (checkBitsZero(bits, bytes)) { 
+            break; 
+        }
+
+        std::swap(processing, bytes);
+
         // printf("Bits %2d, Try:  %s\n", bits, toHex(hashBytes, length));
     }
 
-    *hash = toHex(hashBytes, length);
+    *message = toHex(processing, processed);
+    *hash = toHex(bytes, length);
+    free(bytes);
+    free(processing);
 
     // printf("Bits %2d, Hash: %s\n", bits, *hash);
 
@@ -120,7 +149,7 @@ int findHashEx (int bits, char ** message, char ** hash, const char * hashFuncti
 }
 
 int findHash (int bits, char ** message, char ** hash) {
-    return findHashEx(bits, message, hash, "sha512");
+    return findHashEx(bits, message, hash, defaultType);
 }
 
 #ifndef __PROGTEST__
@@ -128,11 +157,17 @@ int findHash (int bits, char ** message, char ** hash) {
 #include <chrono>
 using namespace std::chrono;
 
+char * toHexLib(uint8_t * bytes, uint32_t length) {
+    char* str = (char*) malloc(length * 2 + 1);
+    size_t strLen;
+    OPENSSL_buf2hexstr_ex(str, length * 2 + 1, &strLen, bytes, length, '\0');
+    return str;
+}
 
 void measure() {
     printf("Measuring...\n");
 
-    const int BITS = 20;
+    const int BITS = 12;
     const int INSTANCES = 128;
 
     char * message, * hash;
@@ -150,19 +185,54 @@ void measure() {
     printf("Done!\n");
 }
 
+void checkSameHash(char * message, char * hash) {
+    const EVP_MD* type = EVP_get_digestbyname(defaultType);
+
+    long buffLen;
+    uint8_t* messBytes = OPENSSL_hexstr2buf(message, &buffLen);
+
+    uint32_t hashLen;
+    uint8_t* bytes = (uint8_t*) malloc(EVP_MAX_MD_SIZE);
+
+    hashMessage(messBytes, buffLen, bytes, hashLen, type);
+    char * encoded = toHexLib(bytes, hashLen);
+    printf("messg: %s\n", message);
+    printf("hash1: %s\n", hash);
+    printf("hash2: %s\n", encoded);
+    assert(strcmp(hash, encoded) == 0);
+
+    free(messBytes);
+    free(bytes);
+    free(encoded);
+}
+
 int main (void) {
+
+    {
+        uint8_t* bytes = randomMessage();
+        char* hash1 = toHex   (bytes, EVP_MAX_MD_SIZE);
+        char* hash2 = toHexLib(bytes, EVP_MAX_MD_SIZE);
+        // printf("%d %d %d %d\n", bytes[0], bytes[1], bytes[2], bytes[4]);
+        // printf("hash1: %s\n", hash1);
+        // printf("hash2: %s\n", hash2);
+        assert(strcmp(hash1, hash2) == 0);
+        free(bytes); free(hash1); free(hash2);
+    }
 
     char * message, * hash;
     for (int i = 0; i < 16; ++i) {
         assert(findHash(i, &message, &hash) == 1);
-        free(message);
-        free(hash);
+        checkSameHash(message, hash);
+        free(message); free(hash);
     }
 
     measure();
 
     assert(findHash(-1, &message, &hash) == 0);
+    free(message); free(hash);
     assert(findHash(512, &message, &hash) == 0);
+    free(message); free(hash);
+
     return EXIT_SUCCESS;
 }
 #endif /* __PROGTEST__ */
