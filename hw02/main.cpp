@@ -19,9 +19,56 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <memory>
+std::unique_ptr<int> a;
+
 #endif /* __PROGTEST__ */
 
 const char * defaultType = "sha512";
+
+struct FreeDeleter {
+    void operator()(void* ptr) {
+        free(ptr);
+    }
+};
+
+template<typename T, typename F>
+class SmartPointer final {
+    public:
+        SmartPointer(T * ptr, const F& deleter) : ptr(ptr), deleter(deleter) {}
+        ~SmartPointer() {
+            deleter(ptr);
+        }
+
+        operator const T* () const { return ptr; }
+        operator       T* ()       { return ptr; }
+
+        const T& operator* () const { return *ptr; }
+              T& operator* ()       { return *ptr; }
+        const T* operator->() const { return ptr; }
+              T* operator->()       { return ptr; }
+
+    private:
+        T * ptr;
+        F deleter;
+        SmartPointer(const SmartPointer<T, F>&) = delete;
+        SmartPointer<T, F>& operator= (const SmartPointer<T, F>&) = delete;
+
+        template<typename T1, typename F1>
+        friend void mswap(SmartPointer<T1, F1>& a, SmartPointer<T1, F1>& b);
+};
+
+template<typename T, typename F>
+void mswap(SmartPointer<T, F>& a, SmartPointer<T, F>& b) {
+    std::swap(a.ptr, b.ptr);
+    std::swap(a.deleter, b.deleter);
+}
+
+template<typename T, typename F>
+SmartPointer<T, F> make_smart(T * ptr, const F& fun) {
+    return SmartPointer<T, F>(ptr, fun);
+}
+
 
 int checkBitsZero(int bits, uint8_t * hash) {
     int bytesToCheck = bits / 8;
@@ -48,17 +95,40 @@ uint8_t * randomMessage() {
     return message;
 }
 
-int hashMessage(uint8_t * bytes, uint32_t bytesSize, uint8_t * hash, uint32_t& length, const EVP_MD * type) {
+EVP_MD_CTX * createContext(int bits, const EVP_MD * type) {
+
     // Create context for hashing
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX * ctx = EVP_MD_CTX_new();
+
     if (ctx == NULL) {
         printf("Failed to create the context");
-        return 0;
+        return nullptr;
     }
+
+    // // context setup for our hash type
+    // if (!EVP_DigestInit_ex(ctx, type, NULL)) {
+    //     printf("Failed to setup the context");
+    //     EVP_MD_CTX_free(ctx);
+    //     return nullptr;
+    // }
+    
+    // int hashSize = EVP_MD_CTX_size(ctx);
+    int hashSize = EVP_MD_size(type);
+    if (bits < 0 || bits >= (int) hashSize * 8) { 
+        printf("Invalid hash range, exp: 0-%d, got: %d\n", hashSize * 8, bits);
+        EVP_MD_CTX_free(ctx);
+        return nullptr;
+    }
+
+    return ctx;
+}
+
+int hashMessage(EVP_MD_CTX * ctx, uint8_t * bytes, uint32_t bytesSize, uint8_t * hash, uint32_t& length, const EVP_MD * type) {
 
     // context setup for our hash type
     if (!EVP_DigestInit_ex(ctx, type, NULL)) {
         printf("Failed to setup the context");
+        EVP_MD_CTX_free(ctx);
         return 0;
     }
 
@@ -73,9 +143,6 @@ int hashMessage(uint8_t * bytes, uint32_t bytesSize, uint8_t * hash, uint32_t& l
         printf("Failed to fin the context");
         return 0;
     }
-
-    // destroy the context
-    EVP_MD_CTX_free(ctx);
 
     return 1;
 }
@@ -109,23 +176,23 @@ int findHashEx (int bits, char ** message, char ** hash, const char * hashFuncti
         return 0;
     }
 
-    uint8_t* bytes = (uint8_t*) malloc(EVP_MAX_MD_SIZE);
-    uint8_t* processing = randomMessage();
+    EVP_MD_CTX * ctxPtr = createContext(bits, type);
+    if (ctxPtr == nullptr) { return 0; }
+    auto ctx = make_smart(ctxPtr, [](EVP_MD_CTX * ctx){
+            // destroy the context
+            EVP_MD_CTX_free(ctx);
+            });
+
+    auto bytes = make_smart((uint8_t*) malloc(EVP_MAX_MD_SIZE), FreeDeleter());
+    auto processing = make_smart(randomMessage(), FreeDeleter());
+
     uint32_t length = EVP_MAX_MD_SIZE;
     uint32_t processed;
 
     while(true) {
         processed = length;
 
-        if (!hashMessage(processing, processed, bytes, length, type)) { 
-            free(bytes);
-            free(processing); 
-            return 0; 
-        }
-
-        if (bits < 0 || bits >= (int) length * 8) { 
-            free(bytes); 
-            free(processing); 
+        if (!hashMessage(ctx, processing, processed, bytes, length, type)) { 
             return 0; 
         }
 
@@ -133,15 +200,13 @@ int findHashEx (int bits, char ** message, char ** hash, const char * hashFuncti
             break; 
         }
 
-        std::swap(processing, bytes);
+        mswap(processing, bytes);
 
         // printf("Bits %2d, Try:  %s\n", bits, toHex(hashBytes, length));
     }
 
     *message = toHex(processing, processed);
     *hash = toHex(bytes, length);
-    free(bytes);
-    free(processing);
 
     // printf("Bits %2d, Hash: %s\n", bits, *hash);
 
@@ -193,8 +258,9 @@ void checkSameHash(char * message, char * hash) {
 
     uint32_t hashLen;
     uint8_t* bytes = (uint8_t*) malloc(EVP_MAX_MD_SIZE);
+    EVP_MD_CTX * ctx = createContext(0, type);
 
-    hashMessage(messBytes, buffLen, bytes, hashLen, type);
+    hashMessage(ctx, messBytes, buffLen, bytes, hashLen, type);
     char * encoded = toHexLib(bytes, hashLen);
     printf("messg: %s\n", message);
     printf("hash1: %s\n", hash);
@@ -204,6 +270,7 @@ void checkSameHash(char * message, char * hash) {
     free(messBytes);
     free(bytes);
     free(encoded);
+    EVP_MD_CTX_free(ctx);
 }
 
 int main (void) {
