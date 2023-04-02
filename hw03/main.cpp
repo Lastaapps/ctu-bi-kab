@@ -20,8 +20,7 @@
 
 using namespace std;
 
-struct crypto_config
-{
+struct crypto_config {
 	const char * m_crypto_function;
 	std::unique_ptr<uint8_t[]> m_key;
 	std::unique_ptr<uint8_t[]> m_IV;
@@ -31,22 +30,122 @@ struct crypto_config
 
 #endif /* _PROGTEST_ */
 
-bool encrypt_data ( const std::string & in_filename, const std::string & out_filename, crypto_config & config )
-{
+struct Unit {};
+
+template<typename T>
+using SP = shared_ptr<T>;
+
+template<typename T>
+struct Optional {
+	bool success;
+	T data;
+	Optional() : success(false) {}
+	Optional(T& data)  : success(true), data(data) {}
+	Optional(T&& data) : success(true), data(std::move(data)) {}
+};
+
+template<typename T>
+struct Array {
+	size_t size;
+	T* data;
+	Array(size_t size = 0) : size(size), data((T*) malloc(size * sizeof(T))) {}
+	~Array() {
+		free(data);
+		data = nullptr;
+	}
+
+	Array(const Array<T>& src) = delete;
+	Array operator=(const Array<T>& src) = delete;
+	
+	Array(Array<T>&& src) {
+		free(data);
+		size = src.size;
+		data = src.data;
+		src.size = 0;
+		src.data = nullptr;
+	};
+};
+
+[[nodiscard]]
+Optional<std::ifstream> openFileForReading(const std::string& name) {
+	auto f = ifstream(name, std::ifstream::binary);
+	f.peek();
+	if (!f.is_open() || f.fail()) {
+		return {};
+	}
+
+	return {std::move(f)};
+}
+
+[[nodiscard]]
+Optional<std::ofstream> openFileForWriting(const std::string& name) {
+	auto f = ofstream(name, std::ifstream::binary);
+	char arr[] = {0};
+	f.write(arr, 1);
+	f.seekp(0);
+	if (!f.is_open() || f.fail()) {
+		return {};
+	}
+	return {std::move(f)};
+}
+
+[[nodiscard]]
+Optional<Array<uint8_t>> readBytes(ifstream& in, size_t len) {
+	Array<uint8_t> bytes(len);
+	in.read((char*) bytes.data, len);
+	if (in.fail()) {
+		return {};
+	}
+	return {std::move(bytes)};
+}
+
+[[nodiscard]]
+Optional<Unit> writeBytes(ofstream& out, const Array<uint8_t>& array) {
+	out.write((char*) array.data, array.size);
+	if (out.fail()) {
+		return {};
+	}
+	return {Unit()};
+}
+
+
+
+bool encrypt_data ( const std::string & inFilename, const std::string & outFilename, crypto_config & config ) {
+	auto inOpt  = openFileForReading(inFilename);
+	auto outOpt = openFileForWriting(outFilename);
+	if (! inOpt.success) { return false; }
+	if (!outOpt.success) { return false; }
+	auto& in  = inOpt.data;
+	auto& out = inOpt.data;
+
 
 }
 
-bool decrypt_data ( const std::string & in_filename, const std::string & out_filename, crypto_config & config )
-{
+bool decrypt_data ( const std::string & inFilename, const std::string & outFilename, crypto_config & config ) {
 
 }
 
 
 #ifndef __PROGTEST__
 
-bool compare_files ( const char * name1, const char * name2 )
-{
+// https://stackoverflow.com/questions/12791807/get-file-size-with-stdiosate
+bool compare_files ( const char * name1, const char * name2) {
+	std::ifstream f1(name1, std::ifstream::binary|std::ifstream::ate);
+  std::ifstream f2(name2, std::ifstream::binary|std::ifstream::ate);
 
+  if (f1.fail() || f2.fail()) {
+    return false;
+  }
+
+  if (f1.tellg() != f2.tellg()) {
+    return false;
+  }
+
+  f1.seekg(0, std::ifstream::beg);
+  f2.seekg(0, std::ifstream::beg);
+  return std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
+                    std::istreambuf_iterator<char>(),
+                    std::istreambuf_iterator<char>(f2.rdbuf()));
 }
 
 int main ( void )
