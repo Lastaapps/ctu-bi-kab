@@ -63,28 +63,6 @@ struct Optional {
           T* operator->()       { return  data; }
 };
 
-template<typename T>
-struct Array {
-  size_t size;
-  T* data = nullptr;
-  Array(size_t size = 0) : size(size), data((T*) malloc(size * sizeof(T))) {}
-  ~Array() {
-    free(data);
-    data = nullptr;
-  }
-
-  Array(const Array<T>& src) = delete;
-  Array operator=(const Array<T>& src) = delete;
-  
-  Array(Array<T>&& src) {
-    free(data);
-    size = src.size;
-    data = src.data;
-    src.size = 0;
-    src.data = nullptr;
-  };
-};
-
 void deleteEVP_CIPHER_CTX(EVP_CIPHER_CTX * ptr) {
   EVP_CIPHER_CTX_free(ptr);
 }
@@ -99,9 +77,10 @@ std::unique_ptr<uint8_t[]> randBytes(int len) {
   RAND_bytes(data.get(), len);
   return data;
 }
+
 using context_ptr = unique_ptr<EVP_CIPHER_CTX, void(*)(EVP_CIPHER_CTX *)>;
 
-Optional<context_ptr> createContext(crypto_config& config, bool encryption) {
+Optional<context_ptr> createContext(crypto_config& config, const bool encryption) {
   OpenSSL_add_all_ciphers();
 
   const EVP_CIPHER * cipher = EVP_get_cipherbyname(config.m_crypto_function);
@@ -120,13 +99,16 @@ Optional<context_ptr> createContext(crypto_config& config, bool encryption) {
     }
     auto rand = randBytes(expKeyLength);
     std::swap(config.m_key, rand);
+    config.m_key_len = expKeyLength;
   }
+
   if (expIVLength != 0 && ((int) config.m_IV_len < expIVLength || config.m_IV == nullptr)) {
     if (!encryption) {
       return {};
     }
     auto rand = randBytes(expIVLength);
     std::swap(config.m_IV, rand);
+    config.m_IV_len = expIVLength;
   }
 
   if (!EVP_CipherInit_ex(ctx.get(), cipher, nullptr, config.m_key.get(), config.m_IV.get(), encryption ? 1 : 0)) {
@@ -166,7 +148,6 @@ Optional<size_t> getFileSize(ifstream& in) {
     fsize = in.tellg();
     in.seekg(0, std::ios::end);
     fsize = in.tellg() - fsize;
-    // in.seekg(0, std::ios::beg);
     in.seekg(0);
 
     if (in.fail()) { return {}; }
@@ -175,27 +156,24 @@ Optional<size_t> getFileSize(ifstream& in) {
 }
 
 [[nodiscard]]
-Optional<Array<uint8_t>> readBytes(ifstream& in, size_t fileLen, size_t len) {
+Optional<size_t> readBytes(ifstream& in, size_t fileLen, uint8_t * bytes, size_t len) {
   len = min(fileLen - in.tellg(), len);
 
-  Array<uint8_t> bytes(len);
-  in.read((char*) bytes.data, len);
+  in.read((char*) bytes, len);
 
-  if (in.fail() && !in.eof()) { return {}; }
+  if (in.fail()) { return {}; }
 
-  streamsize read = in.gcount();
-  bytes.size = read;
+  const streamsize read = in.gcount();
 
-  return {std::move(bytes)};
+  return {(size_t) read};
 }
 
 [[nodiscard]]
-Optional<Unit> writeBytes(ofstream& out, const Array<uint8_t>& array) {
-  out.write((char*) array.data, array.size);
-  if (out.fail()) {
-    return {};
-  }
-  return {Unit()};
+Optional<Unit> writeBytes(ofstream& out, const uint8_t * array, const size_t len) {
+  out.write((char*) array, len);
+  if (out.fail()) { return {}; }
+
+  return { Unit() };
 }
 
 struct FileAutoCloser {
@@ -243,44 +221,41 @@ bool withOpenedFiles(const std::string & inFilename, const std::string & outFile
 
   // Move first 18 bytes
   {
-    auto bytesOpt = readBytes(in, fileSize, headerSize);
-    if (bytesOpt.success == false || bytesOpt->size != headerSize) { OUT("Failed to read the header"); return false; }
-    auto& bytes = *bytesOpt;
+    auto bytes = make_unique<uint8_t[]>(headerSize);
+    auto readOpt = readBytes(in, fileSize, bytes.get(), headerSize);
+    if (readOpt.success == false || *readOpt != headerSize) { OUT("Failed to read the header"); return false; }
 
-    auto resOpt = writeBytes(out, bytes);
+    auto resOpt = writeBytes(out, bytes.get(), *readOpt);
     if (resOpt.success == false) { OUT("Failed to write the header"); return false; }
   }
 
 
   // The actual encryption/decryption process
-  const int blockSize = EVP_CIPHER_CTX_block_size(ctx.get());
-  auto outBuff = Array<uint8_t>(2 * blockSize);
+  const size_t blockSize = (size_t) EVP_CIPHER_CTX_block_size(ctx.get());
+  const size_t chunkSize = 1024;
+  const size_t outBuffSize = chunkSize + blockSize;
+  auto  inBuff = make_unique<uint8_t[]>(chunkSize);
+  auto outBuff = make_unique<uint8_t[]>(outBuffSize);
 
   while(true) {
     // Encrypt the file
-    auto readOpt = readBytes(in, fileSize, blockSize);
+    auto readCntOpt = readBytes(in, fileSize, inBuff.get(), chunkSize);
     {
-      if (!readOpt.success) { OUT("Failed to read file"); return false; }
+      if (!readCntOpt.success) { OUT("Failed to read file"); return false; }
 
-      {
-        int len = outBuff.size;
-        if (!EVP_CipherUpdate(ctx.get(), outBuff.data, &len, readOpt->data, readOpt->size)) { OUT("Failed to update the context"); return false; }
-        outBuff.size = len;
-      }
+      int len = outBuffSize;
+      if (!EVP_CipherUpdate(ctx.get(), outBuff.get(), &len, inBuff.get(), *readCntOpt)) { OUT("Failed to update the context"); return false; }
 
-      auto wroteOpt = writeBytes(out, outBuff);
+      auto wroteOpt = writeBytes(out, outBuff.get(), (size_t) len);
       if (!wroteOpt.success) { OUT("Failed to write the file"); return false; }
     }
 
     // File read, finalize
-    if (readOpt->size != (size_t)blockSize) {
-      {
-        int len = outBuff.size;
-        if (!EVP_CipherFinal(ctx.get(), outBuff.data, &len)) { OUT("Failed to finalize the context"); return false; }
-        outBuff.size = len;
-      }
+    if (*readCntOpt != chunkSize) {
+      int len = outBuffSize;
+      if (!EVP_CipherFinal(ctx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return false; }
 
-      auto wroteOpt = writeBytes(out, outBuff);
+      auto wroteOpt = writeBytes(out, outBuff.get(), len);
       if (!wroteOpt.success) { OUT("Failed to write the file"); return false; }
       break; 
     }
@@ -309,18 +284,24 @@ bool compare_files ( const char * name1, const char * name2) {
   std::ifstream f2(name2, std::ifstream::binary|std::ifstream::ate);
 
   if (f1.fail() || f2.fail()) {
+    std::cout << "Failed to open one of the files" << std::endl;
     return false;
   }
 
   if (f1.tellg() != f2.tellg()) {
+    std::cout << "File size differ: " << f1.tellg() << " x " << f2.tellg() << std::endl;
     return false;
   }
 
   f1.seekg(0, std::ifstream::beg);
   f2.seekg(0, std::ifstream::beg);
-  return std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
+  const bool res = std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
                     std::istreambuf_iterator<char>(),
                     std::istreambuf_iterator<char>(f2.rdbuf()));
+  if (!res) {
+    std::cout << "Files are not the same" << std::endl;
+  }
+  return res;
 }
 
 int main ( void )
@@ -386,6 +367,26 @@ int main ( void )
 
   assert( decrypt_data ("image_8_enc_cbc.TGA", "out_file.TGA", config)  &&
         compare_files("out_file.TGA", "ref_8_dec_cbc.TGA") );
+
+  // My tests
+  config.m_key_len = 15;
+  assert( !decrypt_data ("image_8_enc_cbc.TGA", "out_file.TGA", config) );
+  config.m_key_len = 16;
+
+  config.m_IV_len = 15;
+  assert( !decrypt_data ("image_8_enc_cbc.TGA", "out_file.TGA", config) );
+  config.m_IV_len = 16;
+
+  const char* oldName = config.m_crypto_function;
+  config.m_crypto_function = "fdsa";
+  assert( !decrypt_data ("image_8_enc_cbc.TGA", "out_file.TGA", config) );
+  config.m_crypto_function = oldName;
+
+  assert( !decrypt_data ("image_8_enc_cbc.TGA", "nonwritable", config) );
+  assert( !decrypt_data ("nonreadable", "out_file.TGA", config) );
+  assert( !decrypt_data ("nonexisting", "out_file.TGA", config) );
+  assert( !decrypt_data ("wrongheader", "out_file.TGA", config) );
+
   return 0;
 }
 
