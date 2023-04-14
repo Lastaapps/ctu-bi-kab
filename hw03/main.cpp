@@ -36,6 +36,15 @@ struct crypto_config {
 
 #endif /* _PROGTEST_ */
 
+#define CAT(a,b) CAT2(a,b) // force expand
+#define CAT2(a,b) a##b // actually concatenate
+#define UNIQUE_ID() CAT(_uid_,__LINE__)
+
+#define bindNamed(out, opt, expr, err) auto opt = (expr); if (!opt.success) { OUT(err); return {}; } auto out = std::move(*UNIQUE_ID());
+#define bindCheckNamed(opt, expr, err) auto opt = (expr); if (!opt.success) { OUT(err); return {}; }
+#define bind(out, expr, err) bindNamed(out, UNIQUE_ID(), expr, err)
+#define bindCheck(expr, err) bindCheckNamed(UNIQUE_ID(), expr, err)
+
 struct Unit {};
 
 template<typename T>
@@ -198,25 +207,15 @@ struct FileAutoCloser {
 bool withOpenedFiles(const std::string & inFilename, const std::string & outFilename, crypto_config & config, bool encrypt) {
 
   // Resources preparation
-  auto inOpt  = openFileForReading(inFilename);
-  if (! inOpt.success) { OUT("Failed to open the file for reading"); return false; }
-  auto& in  = *inOpt;
-
-  auto outOpt = openFileForWriting(outFilename);
-  if (!outOpt.success) { inOpt->close(); OUT("Failed to open the file for writing"); return false; }
-  auto& out = *outOpt;
+  bind(in, openFileForReading(inFilename), "Failed to open the file for reading");
+  bind(out, openFileForWriting(outFilename), "Failed to open the file for writing");
   auto fileCloser = FileAutoCloser(in, out);
 
-  auto fileSizeOpt = getFileSize(in);
-  if (!fileSizeOpt.success) { OUT("Failed to obtain file size"); return false; }
-  auto fileSize = *fileSizeOpt;
-
+  bind(fileSize, getFileSize(in), "Failed to create context")
 
 
   // OpenSSL init
-  auto ctxOpt = createContext(config, encrypt);
-  if (!ctxOpt.success) { OUT("Failed to create context"); return false; }
-  auto& ctx = *ctxOpt;
+  bind(ctx, createContext(config, encrypt), "Failed to create context")
 
 
   // Move first 18 bytes
@@ -239,24 +238,19 @@ bool withOpenedFiles(const std::string & inFilename, const std::string & outFile
 
   while(true) {
     // Encrypt the file
-    auto readCntOpt = readBytes(in, fileSize, inBuff.get(), chunkSize);
-    {
-      if (!readCntOpt.success) { OUT("Failed to read file"); return false; }
+    bind(readCnt, readBytes(in, fileSize, inBuff.get(), chunkSize), ("Failed to read file"));
 
-      int len = outBuffSize;
-      if (!EVP_CipherUpdate(ctx.get(), outBuff.get(), &len, inBuff.get(), *readCntOpt)) { OUT("Failed to update the context"); return false; }
+    int len = outBuffSize;
+    if (!EVP_CipherUpdate(ctx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return false; }
 
-      auto wroteOpt = writeBytes(out, outBuff.get(), (size_t) len);
-      if (!wroteOpt.success) { OUT("Failed to write the file"); return false; }
-    }
+    bindCheck(writeBytes(out, outBuff.get(), (size_t) len), "Failed to write the file")
 
     // File read, finalize
-    if (*readCntOpt != chunkSize) {
+    if (readCnt!= chunkSize) {
       int len = outBuffSize;
       if (!EVP_CipherFinal(ctx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return false; }
 
-      auto wroteOpt = writeBytes(out, outBuff.get(), len);
-      if (!wroteOpt.success) { OUT("Failed to write the file"); return false; }
+      bindCheck(writeBytes(out, outBuff.get(), len), "Failed to write the file")
       break; 
     }
   }
