@@ -240,7 +240,7 @@ bool seal(
   // Create a cipher
   const EVP_CIPHER* cipherType = EVP_get_cipherbyname(symmetricCipher);
   if (cipherType == nullptr) { return {}; }
-  const int32_t nid = EVP_CIPHER_get_nid(cipherType);
+  const int32_t nid = EVP_CIPHER_nid(cipherType);
 
   // Create a cipher context
   auto cipherCtx = CipherCtxPtr(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
@@ -248,10 +248,10 @@ bool seal(
   if (!EVP_CIPHER_CTX_init(cipherCtx.get())) { return {}; };
 
   // Load cipher info
-  size_t ivTypeLen  = EVP_CIPHER_iv_length(cipherType);
   size_t keyTypeLen = EVP_PKEY_size(key.get());
-  auto ivBuff = make_unique<uint8_t[]>(ivTypeLen);
+  size_t ivTypeLen  = EVP_CIPHER_iv_length(cipherType);
   auto keyBuffRaw = new uint8_t[keyTypeLen];
+  auto ivBuff = make_unique<uint8_t[]>(ivTypeLen);
   int keyLen;
 
   // Init
@@ -329,9 +329,8 @@ bool open(const char * inFileName,
 
   // Load the remaining data
   size_t ivTypeLen  = EVP_CIPHER_iv_length(cipherType);
-  size_t keyTypeLen = EVP_PKEY_size(key.get());
   auto ivBuff = make_unique<uint8_t[]>(ivTypeLen);
-  auto keyBuff = make_unique<uint8_t[]>(keyTypeLen);
+  auto keyBuff = make_unique<uint8_t[]>(keyLen);
 
   bindCheck(readBytesPrecise(inFile, fileSize, keyBuff.get(), keyLen), "Failed to read key");
   bindCheck(readBytesPrecise(inFile, fileSize, ivBuff.get(), ivTypeLen), "Failed to read iv");
@@ -373,11 +372,55 @@ bool open(const char * inFileName,
 
 #ifndef __PROGTEST__
 
+// https://stackoverflow.com/questions/12791807/get-file-size-with-stdiosate
+bool compare_files ( const char * name1, const char * name2) {
+  std::ifstream f1(name1, std::ifstream::binary|std::ifstream::ate);
+  std::ifstream f2(name2, std::ifstream::binary|std::ifstream::ate);
+
+  if (f1.fail() || f2.fail()) {
+    std::cout << "Failed to open one of the files" << std::endl;
+    return false;
+  }
+
+  if (f1.tellg() != f2.tellg()) {
+    std::cout << "File size differ: " << f1.tellg() << " x " << f2.tellg() << std::endl;
+    return false;
+  }
+
+  f1.seekg(0, std::ifstream::beg);
+  f2.seekg(0, std::ifstream::beg);
+  const bool res = std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
+                    std::istreambuf_iterator<char>(),
+                    std::istreambuf_iterator<char>(f2.rdbuf()));
+  if (!res) {
+    std::cout << "Files are not the same" << std::endl;
+  }
+  return res;
+}
+
 int main (void) {
   assert(seal("fileToEncrypt", "sealed.bin", "PublicKey.pem", "aes-128-cbc"));
   assert(open("sealed.bin", "openedFileToEncrypt", "PrivateKey.pem"));
+  assert(compare_files("fileToEncrypt", "openedFileToEncrypt"));
+
+  assert(seal("fileToEncrypt", "sealed.bin", "PublicKey.pem", "aes-128-ecb"));
+  assert(open("sealed.bin", "openedFileToEncrypt", "PrivateKey.pem"));
+  assert(compare_files("fileToEncrypt", "openedFileToEncrypt"));
 
   assert(open("sealed_sample.bin", "opened_sample.txt", "PrivateKey.pem"));
+
+  assert(!seal("idk", "sealed.bin", "PublicKey.pem", "aes-128-cbc"));
+  assert(!seal("fileToEncrypt", "sealed.bin", "idk.pem", "aes-128-cbc"));
+  assert(!seal("fileToEncrypt", "sealed.bin", "PublicKey.pem", "idk"));
+  assert(!open("idk.bin", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("sealed_sample.bin", "opened_sample.txt", "idk.pem"));
+
+  assert(!open("bytes_00", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("bytes_04", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("bytes_08", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("sealed_sample_broken_id.bin", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("sealed_sample_broken_key.bin", "opened_sample.txt", "PrivateKey.pem"));
+  assert(!open("sealed_sample_broken_len.bin", "opened_sample.txt", "PrivateKey.pem"));
 
   return 0;
 }
