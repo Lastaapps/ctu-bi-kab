@@ -32,7 +32,7 @@ using namespace std;
 #define CAT2(a,b) a##b // actually concatenate
 #define UNIQUE_ID() CAT(_uid_,__LINE__)
 
-#define bindNamed(out, opt, expr, err) auto opt = (expr); if (!opt.success) { OUT(err); return {}; } auto out = std::move(*UNIQUE_ID());
+#define bindNamed(out, opt, expr, err) auto opt = (expr); if (!opt.success) { OUT(err); return {}; } auto out = std::move(*opt);
 #define bindCheckNamed(opt, expr, err) auto opt = (expr); if (!opt.success) { OUT(err); return {}; }
 #define bind(out, expr, err) bindNamed(out, UNIQUE_ID(), expr, err)
 #define bindCheck(expr, err) bindCheckNamed(UNIQUE_ID(), expr, err)
@@ -51,8 +51,7 @@ struct Option {
   Option(const Option<T>&) = delete;
   Option operator=(const Option<T>&) = delete;
   Option operator=(Option<T>&& dest) {
-    dest.success = success;
-    success = false;
+    std::swap(success, dest.success);
     std::swap(data, dest.data);
     return *this;
   };
@@ -143,22 +142,24 @@ Option<Unit> writeBytes(ofstream& out, const uint8_t * array, const size_t len) 
 
 // --- Files closing ----------------------------------------------------------
 struct FileAutoCloser {
-  ifstream& in;
-  ofstream& out;
-  bool shouldClose = true;
-  FileAutoCloser(ifstream& in, ofstream& out) : in(in), out(out) {}
+  private:
+    ifstream& in;
+    ofstream& out;
+    bool shouldClose = true;
+  public:
+    FileAutoCloser(ifstream& in, ofstream& out) : in(in), out(out) {}
 
-  Option<Unit> close() {
-    shouldClose = false;
-    in.close();
-    out.close();
-    return boolToOpt(!(in.fail() || out.fail())); 
-  }
-  ~FileAutoCloser() {
-    if (shouldClose) {
-      close();
+    Option<Unit> close() {
+      shouldClose = false;
+      in.close();
+      out.close();
+      return boolToOpt(!(in.fail() || out.fail())); 
     }
-  }
+    ~FileAutoCloser() {
+      if (shouldClose) {
+        close();
+      }
+    }
 };
 
 /**
@@ -224,6 +225,12 @@ bool seal(
     const char * publicKeyFileName,
     const char * symmetricCipher
     ) {
+
+  if (inFileName == nullptr) { return false; }
+  if (outFileName == nullptr) { return false; }
+  if (publicKeyFileName == nullptr) { return false; }
+  if (symmetricCipher == nullptr) { return false; }
+
   OpenSSL_add_all_ciphers();
   bindCheck(initRandom(), "Failed to init random");
 
@@ -237,15 +244,15 @@ bool seal(
   // Read key for the main key encryption
   bind(key, readPubKey(publicKeyFileName), "Failed to load public key");
 
-  // Create a cipher
+  // Get the cipher type
   const EVP_CIPHER* cipherType = EVP_get_cipherbyname(symmetricCipher);
-  if (cipherType == nullptr) { return {}; }
+  if (cipherType == nullptr) { OUT("Uknown cipher type"); return {}; }
   const int32_t nid = EVP_CIPHER_nid(cipherType);
 
   // Create a cipher context
   auto cipherCtx = CipherCtxPtr(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
-  if (cipherCtx == nullptr) { return {}; }
-  if (!EVP_CIPHER_CTX_init(cipherCtx.get())) { return {}; };
+  if (cipherCtx == nullptr) { OUT("Failed to create a context"); return {}; }
+  if (!EVP_CIPHER_CTX_init(cipherCtx.get())) { OUT("Failed to init the context"); return {}; };
 
   // Load cipher info
   size_t keyTypeLen = EVP_PKEY_size(key.get());
@@ -256,7 +263,7 @@ bool seal(
 
   // Init
   auto publicKeyPtr = key.get();
-  if (!EVP_SealInit(cipherCtx.get(), cipherType, &keyBuffRaw, &keyLen, ivBuff.get(), &publicKeyPtr, 1)) { delete [] keyBuffRaw; return {}; }
+  if (!EVP_SealInit(cipherCtx.get(), cipherType, &keyBuffRaw, &keyLen, ivBuff.get(), &publicKeyPtr, 1)) { delete [] keyBuffRaw; OUT("Failed to init seal"); return {}; }
   auto keyBuff = unique_ptr<uint8_t[]>(keyBuffRaw);
 
   // Store cipher info
@@ -273,7 +280,7 @@ bool seal(
   auto outBuff = make_unique<uint8_t[]>(outBuffSize);
   while(true) {
     // Encrypt the file
-    bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), ("Failed to read file"));
+    bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), "Failed to read file");
 
     int len = outBuffSize;
     if (!EVP_SealUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return false; }
@@ -301,6 +308,11 @@ bool open(const char * inFileName,
     const char * outFileName,
     const char * privateKeyFileName
     ) {
+
+  if (inFileName == nullptr) { return false; }
+  if (outFileName == nullptr) { return false; }
+  if (privateKeyFileName == nullptr) { return false; }
+
   OpenSSL_add_all_ciphers();
 
   // Open files
@@ -320,17 +332,19 @@ bool open(const char * inFileName,
 
   // Get cipher type
   const EVP_CIPHER* cipherType = EVP_get_cipherbynid(nid);
-  if (cipherType == nullptr) { return {}; }
+  if (cipherType == nullptr) { OUT("Unknown cipher type"); return {}; }
 
   // Create context
   auto cipherCtx = CipherCtxPtr(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
-  if (cipherCtx == nullptr) { return {}; }
-  if (!EVP_CIPHER_CTX_init(cipherCtx.get())) { return {}; };
+  if (cipherCtx == nullptr) { OUT("Failed to create a context"); return {}; }
+  if (!EVP_CIPHER_CTX_init(cipherCtx.get())) { OUT("Failed to init the context"); return {}; };
 
   // Load the remaining data
+  size_t keyTypeLen = EVP_PKEY_size(key.get());
   size_t ivTypeLen  = EVP_CIPHER_iv_length(cipherType);
-  auto ivBuff = make_unique<uint8_t[]>(ivTypeLen);
   auto keyBuff = make_unique<uint8_t[]>(keyLen);
+  auto ivBuff = make_unique<uint8_t[]>(ivTypeLen);
+  if (keyLen < 0 || (size_t) keyLen > keyTypeLen) { OUT("The key len is not in a valid range"); return {}; }
 
   bindCheck(readBytesPrecise(inFile, fileSize, keyBuff.get(), keyLen), "Failed to read key");
   bindCheck(readBytesPrecise(inFile, fileSize, ivBuff.get(), ivTypeLen), "Failed to read iv");
