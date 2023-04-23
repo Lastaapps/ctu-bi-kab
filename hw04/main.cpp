@@ -217,6 +217,34 @@ Option<PKeyPtr> readPrivateKey(const char * filename) {
   return { std::move(ptr) };
 }
 
+Option<Unit> processFile(CipherCtxPtr& cipherCtx, ifstream& inFile, size_t fileSize, ofstream& outFile) {
+  const size_t blockSize = (size_t) EVP_CIPHER_CTX_block_size(cipherCtx.get());
+  const size_t chunkSize = 1024;
+  const size_t outBuffSize = chunkSize + blockSize;
+  auto  inBuff = make_unique<uint8_t[]>(chunkSize);
+  auto outBuff = make_unique<uint8_t[]>(outBuffSize);
+
+  while(true) {
+    bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), ("Failed to read file"));
+
+    int len = outBuffSize;
+    if (!EVP_CipherUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return {}; }
+
+    bindCheck(writeBytes(outFile, outBuff.get(), (size_t) len), "Failed to write the file")
+
+    // File read, finalize
+    if (readCnt != chunkSize) {
+      int len = outBuffSize;
+      if (!EVP_CipherFinal(cipherCtx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return {}; }
+
+      bindCheck(writeBytes(outFile, outBuff.get(), len), "Failed to write the file")
+      break; 
+    }
+  }
+
+  return some(Unit{});
+}
+
 bool seal(
     const char * inFileName,
     const char * outFileName,
@@ -269,32 +297,8 @@ bool seal(
   bindCheck(writeBytes(outFile, (uint8_t*)&keyLen, sizeof(keyLen)), "Failed to write key len");
   bindCheck(writeBytes(outFile, keyBuff.get(), keyLen), "Failed to write key");
   bindCheck(writeBytes(outFile, ivBuff.get(), ivTypeLen), "Failed to write key");
-
-  // Encrypt the file
-  const size_t blockSize = (size_t) EVP_CIPHER_CTX_block_size(cipherCtx.get());
-  const size_t chunkSize = 1024;
-  const size_t outBuffSize = chunkSize + blockSize;
-  auto  inBuff = make_unique<uint8_t[]>(chunkSize);
-  auto outBuff = make_unique<uint8_t[]>(outBuffSize);
-  while(true) {
-    // Encrypt the file
-    bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), "Failed to read file");
-
-    int len = outBuffSize;
-    if (!EVP_SealUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return false; }
-
-    bindCheck(writeBytes(outFile, outBuff.get(), (size_t) len), "Failed to write the file")
-
-    // File read, finalize
-    if (readCnt != chunkSize) {
-      int len = outBuffSize;
-      if (!EVP_SealFinal(cipherCtx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return false; }
-
-      bindCheck(writeBytes(outFile, outBuff.get(), len), "Failed to write the file")
-      break; 
-    }
-  }
   
+  bindCheck(processFile(cipherCtx, inFile, fileSize, outFile), "Failed to encrypt the file");
 
   // Cleanup
   bindCheck(closer.close(), "Failed to close the files");
@@ -351,30 +355,7 @@ bool open(const char * inFileName,
   if (!EVP_OpenInit(cipherCtx.get(), cipherType, keyBuff.get(), keyLen, ivBuff.get(), key.get())) { return {}; }
 
   // Decrypt the file
-  const size_t blockSize = (size_t) EVP_CIPHER_CTX_block_size(cipherCtx.get());
-  const size_t chunkSize = 1024;
-  const size_t outBuffSize = chunkSize + blockSize;
-  auto  inBuff = make_unique<uint8_t[]>(chunkSize);
-  auto outBuff = make_unique<uint8_t[]>(outBuffSize);
-
-  while(true) {
-    // Encrypt the file
-    bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), ("Failed to read file"));
-
-    int len = outBuffSize;
-    if (!EVP_OpenUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return false; }
-
-    bindCheck(writeBytes(outFile, outBuff.get(), (size_t) len), "Failed to write the file")
-
-    // File read, finalize
-    if (readCnt != chunkSize) {
-      int len = outBuffSize;
-      if (!EVP_OpenFinal(cipherCtx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return false; }
-
-      bindCheck(writeBytes(outFile, outBuff.get(), len), "Failed to write the file")
-      break; 
-    }
-  }
+  bindCheck(processFile(cipherCtx, inFile, fileSize, outFile), "Failed to dencrypt the file");
   
   // Cleanup
   bindCheck(closer.close(), "Failed to close the files");
