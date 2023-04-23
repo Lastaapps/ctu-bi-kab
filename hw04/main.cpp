@@ -78,7 +78,7 @@ Option<Unit> boolToOpt(const bool b) {
 [[nodiscard]]
 Option<std::ifstream> openFileForReading(const std::string& name) {
   auto f = ifstream(name, std::ifstream::binary);
-  f.peek();
+
   if (!f.is_open() || f.fail()) {
     return {};
   }
@@ -89,9 +89,7 @@ Option<std::ifstream> openFileForReading(const std::string& name) {
 [[nodiscard]]
 Option<std::ofstream> openFileForWriting(const std::string& name) {
   auto f = ofstream(name, std::ifstream::binary);
-  char arr[] = {0};
-  f.write(arr, 1);
-  f.seekp(0);
+
   if (!f.is_open() || f.fail()) {
     return {};
   }
@@ -420,6 +418,10 @@ int main (void) {
   assert(seal("fileToEncrypt", "sealed.bin", "PublicKey.pem", "aes-128-ecb"));
   assert(open("sealed.bin", "openedFileToEncrypt", "PrivateKey.pem"));
   assert(compare_files("fileToEncrypt", "openedFileToEncrypt"));
+
+  assert(seal("empty", "sealed.bin", "PublicKey.pem", "aes-128-cbc"));
+  assert(open("sealed.bin", "openedFileToEncrypt", "PrivateKey.pem"));
+  assert(compare_files("empty", "openedFileToEncrypt"));
 
   assert(open("sealed_sample.bin", "opened_sample.txt", "PrivateKey.pem"));
 
