@@ -41,21 +41,22 @@ struct Unit {};
 
 template<typename T>
 struct Option {
-  bool success;
+  bool success = false;
   private:
-  T * data;
+  T * data = nullptr;
+
   public:
-  Option() : success(false), data(nullptr) {}
+  Option() noexcept : success(false), data(nullptr) {}
   Option(T& data)  : success(true), data(new T(data)) {}
   Option(T&& data) : success(true), data(new T(std::move(data))) {}
   Option(const Option<T>&) = delete;
-  Option operator=(const Option<T>&) = delete;
-  Option operator=(Option<T>&& dest) {
+  Option& operator=(const Option<T>&) = delete;
+  Option& operator=(Option<T>&& dest) noexcept {
     std::swap(success, dest.success);
     std::swap(data, dest.data);
     return *this;
   };
-  ~Option() { delete data; }
+  ~Option() noexcept { delete data; }
 
   const T& operator* () const { return *data; }
   T& operator* ()       { return *data; }
@@ -66,7 +67,7 @@ struct Option {
 template<typename T>
 Option<T> some(T& t) { return Option<T>(t); }
 template<typename T>
-Option<T> some(T&& t) { return Option<T>(std::move(t)); }
+Option<T> some(T&& t) { return Option<T>(std::forward<T>(t)); }
 template<typename T>
 Option<T> none() { return Option<T>(); }
 
@@ -98,7 +99,7 @@ Option<std::ofstream> openFileForWriting(const std::string& name) {
 
 [[nodiscard]]
 Option<size_t> getFileSize(ifstream& in) {
-  std::streampos fsize = 0;
+  std::streampos fsize;
 
   fsize = in.tellg();
   in.seekg(0, std::ios::end);
@@ -114,7 +115,7 @@ Option<size_t> getFileSize(ifstream& in) {
 Option<size_t> readBytes(ifstream& in, size_t fileLen, uint8_t * bytes, size_t len) {
   len = min(fileLen - in.tellg(), len);
 
-  in.read((char*) bytes, len);
+  in.read((char*) bytes, (int) len);
 
   if (in.fail()) { return {}; }
 
@@ -131,7 +132,7 @@ Option<size_t> readBytesPrecise(ifstream& in, size_t fileLen, uint8_t * bytes, s
 
 [[nodiscard]]
 Option<Unit> writeBytes(ofstream& out, const uint8_t * array, const size_t len) {
-  out.write((char*) array, len);
+  out.write((char*) array, (int) len);
   if (out.fail()) { return {}; }
 
   return { Unit() };
@@ -164,16 +165,16 @@ struct FileAutoCloser {
  * Deletes the file given unless the trap is disabled
  */
 struct FileRemoveTrap {
-    FileRemoveTrap(const char * fileName) :fileName(fileName) {}
+    explicit FileRemoveTrap(const char * fileName) :fileName(fileName) {}
     ~FileRemoveTrap() {
-      if (!hasSucced) {
+      if (!hasSucceeded) {
         std::remove(fileName);
       }
     }
-    void disable() { hasSucced = true; }
+    void disable() { hasSucceeded = true; }
   private:
     const char * fileName;
-    bool hasSucced = false;
+    bool hasSucceeded = false;
 };
 
 // --- The Main work, oh no ---------------------------------------------------
@@ -227,14 +228,14 @@ Option<Unit> processFile(CipherCtxPtr& cipherCtx, ifstream& inFile, size_t fileS
   while(true) {
     bind(readCnt, readBytes(inFile, fileSize, inBuff.get(), chunkSize), ("Failed to read file"));
 
-    int len = outBuffSize;
-    if (!EVP_CipherUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), readCnt)) { OUT("Failed to update the context"); return {}; }
+    int len;
+    if (!EVP_CipherUpdate(cipherCtx.get(), outBuff.get(), &len, inBuff.get(), (int)readCnt)) { OUT("Failed to update the context"); return {}; }
 
     bindCheck(writeBytes(outFile, outBuff.get(), (size_t) len), "Failed to write the file")
 
     // File read, finalize
     if (readCnt != chunkSize) {
-      int len = outBuffSize;
+      int len;
       if (!EVP_CipherFinal(cipherCtx.get(), outBuff.get(), &len)) { OUT("Failed to finalize the context"); return {}; }
 
       bindCheck(writeBytes(outFile, outBuff.get(), len), "Failed to write the file")
@@ -272,7 +273,7 @@ bool seal(
 
   // Get the cipher type
   const EVP_CIPHER* cipherType = EVP_get_cipherbyname(symmetricCipher);
-  if (cipherType == nullptr) { OUT("Uknown cipher type"); return {}; }
+  if (cipherType == nullptr) { OUT("Unknown cipher type"); return {}; }
   const int32_t nid = EVP_CIPHER_nid(cipherType);
 
   // Create a cipher context
@@ -355,7 +356,7 @@ bool open(const char * inFileName,
   if (!EVP_OpenInit(cipherCtx.get(), cipherType, keyBuff.get(), keyLen, ivBuff.get(), key.get())) { return {}; }
 
   // Decrypt the file
-  bindCheck(processFile(cipherCtx, inFile, fileSize, outFile), "Failed to dencrypt the file");
+  bindCheck(processFile(cipherCtx, inFile, fileSize, outFile), "Failed to decrypt the file");
   
   // Cleanup
   bindCheck(closer.close(), "Failed to close the files");
